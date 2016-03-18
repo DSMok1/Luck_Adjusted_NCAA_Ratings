@@ -86,7 +86,7 @@ str(Tall_Season_Details)
 # Implement Frisch–Waugh–Lovell theorem for nesting Ridge Regressions
 
 # Generic Source Data
-Data2003 <- droplevels(Tall_Season_Details[Tall_Season_Details$Season==2003,])
+Data2003 <-  droplevels(Tall_Season_Details)   #droplevels(Tall_Season_Details[Tall_Season_Details$Season==2003,])
 Data2003Vars <-Data2003[,c("Team_ID","Opp_ID","loc")]
 Data2003ft_per <- Data2003$ft_per
 Data2003fta <- Data2003$fta
@@ -94,16 +94,16 @@ Data2003fg3_per <- Data2003$fg3_per
 Data2003fg3a <- Data2003$fga3
 
 # Simple Logistic Model
-FTModel <- glm(formula = ft_per ~ Team_ID + loc + 0,
-               family = binomial (link = "logit"),
-               data = Data2003,
-               weights = fta)
-
-summary(FTModel)
-
-Predicted_ft_per_lm <- as.data.frame(predict(FTModel, type = "response"))
-names(Predicted_ft_per_lm) <- c("pred_ft_per_lm")
-Data2003 <- cbind(Data2003,Predicted_ft_per_lm)
+# FTModel <- glm(formula = ft_per ~ Team_ID + loc + 0,
+#                family = binomial (link = "logit"),
+#                data = Data2003,
+#                weights = fta)
+#
+# summary(FTModel)
+#
+# Predicted_ft_per_lm <- as.data.frame(predict(FTModel, type = "response"))
+# names(Predicted_ft_per_lm) <- c("pred_ft_per_lm")
+# Data2003 <- cbind(Data2003,Predicted_ft_per_lm)
 
 
 
@@ -340,10 +340,86 @@ Data2003$Residual_fg3_per <- Data2003$fg3_per - Data2003$Predicted_fg3_per
 
 qplot(Predicted_fg3_per, fg3_per,data = Data2003,  size = fga3, alpha = I(1/25))
 
+Data_Plot_fg3 <- Data2003[(Data2003$fga3>10 & Data2003$fga3<24),c("fga3","Predicted_fg3_per","fg3_per","Residual_fg3_per")]
+
+Plot_fg3_hist <- ggplot(Data_Plot_fg3, aes(Residual_fg3_per)) + geom_histogram(binwidth=0.005)
+Plot_fg3_hist
+Plot_fg3_hist + facet_grid (fga3 ~ .)
+
+fg3_summary <- group_by(Data2003,fga3) %>%
+  summarize(
+    Var_Resid_fg3 = var(Residual_fg3_per),
+    Var_fg3 = var(fg3_per),
+    Var_Pred_fg3 = var(Predicted_fg3_per),
+    Mean_Resid_fg3 = mean(Residual_fg3_per),
+    Mean_fg3 = mean(fg3_per),
+    Mean_Pred_fg3 = mean(Predicted_fg3_per),
+    Count = length(fga3),
+    inv_fga3 = 1/mean(fga3)
+  ) %>% filter(Count>50) %>%
+  mutate(Var_Binomial = Mean_fg3*(1-Mean_fg3)/fga3,
+         Var_Unexplained = Var_Resid_fg3 - Var_Binomial)
+
+fg3_summary$Modeled_Var <- predict.lm(lm(data = fg3_summary,
+                                         Var_Unexplained ~ inv_fga3,
+                                         weights = Count))
+
+fg3_summary$fitted
+
+ft_summary <- group_by(Data2003,fta) %>%
+  summarize(
+    Var_Resid_ft = var(Residual_ft_per),
+    Var_ft = var(ft_per),
+    Var_Pred_ft = var(Predicted_ft_per),
+    Mean_Resid_ft = mean(Residual_ft_per),
+    Mean_ft = mean(ft_per),
+    Mean_Pred_ft = mean(Predicted_ft_per),
+    Count = length(fta),
+    inv_fta = 1/mean(fta)
+  ) %>% filter(Count>50) %>%
+  mutate(Var_Binomial = Mean_ft*(1-Mean_ft)/fta,
+         Var_Unexplained = Var_Resid_ft - Var_Binomial)
+
+ft_summary$Modeled_Var <- predict.lm(lm(data = ft_summary,
+                                         Var_Unexplained ~ inv_fta,
+                                         weights = Count))
 
 
+ggplot(fg3_summary, aes(x=fga3)) +
+  geom_line(aes(y=Var_Resid_fg3, color="Variance, adj. for teams & locs"),size=1) +
+  geom_line(aes(y=Var_fg3, color="Raw Variance"),size=1) +
+  geom_line(aes(y=Var_Binomial, color="Binomial Variance"),size=1) +
+  # geom_line(aes(y=Var_Pred_fg3, color="Var_Pred_fg3"))
+  labs(title = "Variance in FG3%", x="3Pt FGA", y= "Variance") +
+  theme(legend.position="top",legend.title= element_blank())
+
+ggplot(ft_summary, aes(x=fta)) +
+  geom_line(aes(y=Var_Resid_ft, color="Variance, adj. for teams & locs"),size=1) +
+  geom_line(aes(y=Var_ft, color="Raw Variance"),size=1) +
+  geom_line(aes(y=Var_Binomial, color="Binomial Variance"),size=1) +
+  # geom_line(aes(y=Var_Pred_ft, color="Var_Pred_ft"))
+  labs(title = "Variance in FT%", x="FTA", y= "Variance") +
+  theme(legend.position="top",legend.title= element_blank())
 
 
+ggplot(fg3_summary, aes(x=fga3)) +
+  geom_line(aes(y=Var_Pred_fg3, color="Variance explained by teams & loc"),size=1) +
+  geom_line(aes(y=Var_Unexplained, color="Unexplained Variance"),size=1) +
+  geom_line(aes(y=Modeled_Var, color="Unexplained Variance, Fit"),size=1) +
+  geom_hline( yintercept = 0) +
+  labs(title = "Variance in FG3%", x="3Pt FGA", y= "Variance") +
+  theme(legend.position="top",legend.title= element_blank())
+
+ggplot(ft_summary, aes(x=fta)) +
+  geom_line(aes(y=Var_Pred_ft, color="Variance explained by teams & loc"),size=1) +
+  geom_line(aes(y=Var_Unexplained, color="Unexplained Variance"),size=1) +
+  geom_line(aes(y=Modeled_Var, color="Unexplained Variance, Fit"),size=1) +
+  geom_hline( yintercept = 0) +
+  labs(title = "Variance in FT%", x="FTA", y= "Variance") +
+  theme(legend.position="top",legend.title= element_blank())
+
+
+qplot(Data2003$Predicted_ft_per, geom="histogram")
 
 
 
