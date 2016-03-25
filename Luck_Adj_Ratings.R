@@ -7,6 +7,9 @@ library(glmnet)
 library(biglm)
 library(MatrixModels)
 library(ggplot2)
+library(reshape2)
+library(stringr)
+library(tidyr)
 
 
 #### Source Data ####
@@ -70,6 +73,15 @@ Reg_Season_Details <- Reg_Season_Details %>% rowwise() %>%
     Lstl_per = Lstl / Poss
   ) %>%
   as.data.frame()
+
+Winning_Scores <- Reg_Season_Details %>% group_by(Season) %>%
+  summarize(Winning_Score = mean(Wscore),
+            Losing_Score = mean(Lscore),
+            Poss = mean(Poss))
+
+
+ggplot(melt(Winning_Scores,id="Season"), aes(x=Season, y=value,color=variable)) +
+  geom_line() + expand_limits(y=0)
 
 
 #### Rearrange Data ####
@@ -587,3 +599,149 @@ hottest_games <- Data %>% filter(Season == 2016) %>% group_by(Game_ID) %>%
 
 View(Data[Data$Game_ID %in% hottest_games$Game_ID[1:10],])
 
+
+### Construct Ratings Matrix ####
+
+Game_Results <- Data %>% group_by(Game_ID) %>%
+  summarize(Team1 = nth(team,1),
+            Team2 = nth(team,2),
+            Team_Name1 = nth(team_name,1),
+            Team_Name2 = nth(team_name,2),
+            Score1 = nth(score,1),
+            Score2 = nth(score,2),
+            Score_Adj1 = nth(score_adj,1),
+            Score_Adj2 = nth(score_adj,2),
+            Loc_Team1 = nth(loc,1),
+            Margin = Score1 - Score2,
+            Margin_Adj = Score_Adj1 - Score_Adj2,
+            Margin_75 = Margin*(75/max(score)),
+            Margin_Adj_75 = Margin_Adj*(75/max(score_adj))
+  ) %>% merge(.,unique(Data[c("Game_ID","Poss","Season","Daynum",
+                      "Numot","Team_Combo","Count_Team_Combo")])) %>%
+  mutate(Team_ID_1 = paste0(Team1,"_",Season),
+         Team_ID_2 = paste0(Team2,"_",Season))
+
+Team_Factors <- as.data.frame(c(Game_Results$Team_ID_1,Game_Results$Team_ID_2))
+names(Team_Factors) <- c("Team_ID")
+
+Game_Results$Team_ID_1 <- factor(Game_Results$Team_ID_1,levels=levels(Team_Factors$Team_ID))
+Game_Results$Team_ID_2 <- factor(Game_Results$Team_ID_2,levels=levels(Team_Factors$Team_ID))
+
+Team1_DF <- Game_Results[,c("Loc_Team1","Team_ID_1")]
+names(Team1_DF)[2]<-"Team_"
+Team2_DF <- Game_Results[,c("Loc_Team1","Team_ID_2")]
+names(Team2_DF)[2]<-"Team_"
+
+Margin_75 <- Game_Results$Margin_75
+Margin_Adj_75 <- Game_Results$Margin_Adj_75
+
+Results_Matrix <- model.Matrix(
+  ~ Loc_Team1 -1,
+  data = Team1_DF,
+  contrasts.arg = lapply(Team1_DF[1:2], contrasts, contrasts = FALSE),
+  sparse = TRUE
+)
+
+Results_Matrix2 <- model.Matrix(
+  ~ Team_ -1,
+  data = Team1_DF,
+  contrasts.arg = lapply(Team1_DF[1:2], contrasts, contrasts = FALSE),
+  sparse = TRUE
+)
+
+Results_Matrix3 <- model.Matrix(
+  ~ Team_ -1,
+  data = Team2_DF,
+  contrasts.arg = lapply(Team2_DF[1:2], contrasts, contrasts = FALSE),
+  sparse = TRUE
+)
+
+Results_Matrix4 <- model.Matrix(
+  ~ Loc_Team1 + Team_ -1,
+  data = Team1_DF,
+  contrasts.arg = lapply(Team1_DF[1:2], contrasts, contrasts = FALSE),
+  sparse = TRUE
+)
+
+Loc_Sparse <- as(Results_Matrix,"dgCMatrix")
+Teams_Sparse <- Results_Matrix2-Results_Matrix3
+
+Combined_Sparse <- cbind2(Loc_Sparse,Teams_Sparse)
+
+Matrix_Trial <- new("dsparseModelMatrix", Combined_Sparse,
+                    assign = Results_Matrix4@assign,
+                    contrasts = Results_Matrix4@contrasts)
+
+
+str(Matrix_Trial)
+dim(Matrix_Trial)
+
+object.size(Matrix_Trial)
+object.size(Results_Matrix2)
+
+head(Matrix_Trial)
+
+
+Scores_1 <- cv.glmnet(
+  x = Matrix_Trial,
+  y = Margin_75,
+  alpha = 0,
+  family = "gaussian",
+  lambda.min = .000000001,
+)
+
+plot(Scores_1)
+
+best_lambda_Scores_1 <- Scores_1$lambda.min
+
+Output1 <- as.data.frame(as.matrix(coef.cv.glmnet(Scores_1)))
+names(Output1) <- c("Margin_75_Ridge")
+Output1 <- add_rownames (Output1, "Rows")
+
+
+Scores_2 <- cv.glmnet(
+  x = Matrix_Trial,
+  y = Margin_Adj_75,
+  alpha = 0,
+  family = "gaussian",
+  lambda.min = .000000001,
+)
+
+plot(Scores_2)
+Output2 <- as.data.frame(as.matrix(coef.cv.glmnet(Scores_2)))
+names(Output2) <- c("Margin_Adj_75_Ridge")
+Output2 <- add_rownames (Output2, "Rows")
+
+Scores_3 <- glmnet(
+  x = Matrix_Trial,
+  y = Margin_75,
+  alpha = 0,
+  family = "gaussian",
+  lambda = 0,
+)
+
+Output3 <- as.data.frame(as.matrix(coef(Scores_3)))
+names(Output3) <- c("Margin_75")
+Output3 <- add_rownames (Output3, "Rows")
+
+Scores_4 <- glmnet(
+  x = Matrix_Trial,
+  y = Margin_Adj_75,
+  alpha = 0,
+  family = "gaussian",
+  lambda = 0,
+)
+
+Output4 <- as.data.frame(as.matrix(coef(Scores_4)))
+names(Output4) <- c("Margin_Adj_75")
+Output4 <- add_rownames (Output4, "Rows")
+
+Results_Matrix <- Reduce(function(...) merge(...,all.x=TRUE),list(Output1,Output2,Output3,Output4))
+
+# Results_Matrix$Delta_Adj <- Results_Matrix$Margin_Adj_75 - Results_Matrix$Margin_75
+Results_Matrix <- separate(data=Results_Matrix,col = Rows, into = c("Junk","Team_Id","season"),sep="_")
+Results_Matrix <- merge(Results_Matrix,Team_IDs,all.x = TRUE)
+
+plot(Results_Matrix$Margin_75,Results_Matrix$Margin_Adj_75)
+View(Results_Matrix)
+View(Results_Matrix[Results_Matrix$season==2016,])
